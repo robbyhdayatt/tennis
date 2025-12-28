@@ -14,5 +14,6 @@ ini_set('display_errors', 1);
 
 // Include database
 require_once __DIR__ . '/database.php';
+// Include CSRF protection
+require_once __DIR__ . '/../includes/csrf.php';
 ?>
-

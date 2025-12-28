@@ -38,7 +38,22 @@ function getPlayTypeName($type) {
     return $type === 'Single' ? 'Tunggal' : 'Ganda';
 }
 
-function getTennisScore($points) {
+function isTieBreak($setId) {
+    $conn = getDBConnection();
+    $stmt = $conn->prepare("SELECT team1_games, team2_games FROM sets WHERE id = ?");
+    $stmt->bind_param("i", $setId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    if ($row = $result->fetch_assoc()) {
+        return ($row['team1_games'] == 6 && $row['team2_games'] == 6);
+    }
+    return false;
+}
+
+function getTennisScore($points, $isTieBreak = false) {
+    if ($isTieBreak) {
+        return (string)$points;
+    }
     $scores = [0 => '0', 1 => '15', 2 => '30', 3 => '40', 4 => 'AD'];
     return $scores[$points] ?? (string)$points;
 }
@@ -170,4 +185,3 @@ function getFinalScore($matchId) {
     ];
 }
 ?>
-

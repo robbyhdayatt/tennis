@@ -12,135 +12,56 @@ if ($matchId === 0) {
 }
 
 $conn = getDBConnection();
-
-// Get match details (can be active or completed)
 $stmt = $conn->prepare("SELECT * FROM matches WHERE id = ?");
 $stmt->bind_param("i", $matchId);
 $stmt->execute();
-$result = $stmt->get_result();
-$match = $result->fetch_assoc();
+$match = $stmt->get_result()->fetch_assoc();
 
 if (!$match) {
     header('Location: index.php');
     exit();
 }
 
-// Get players
-$matchPlayers = getMatchPlayers($matchId);
-
-// Get current set
-$currentSet = getCurrentSet($matchId);
-if (!$currentSet) {
-    // Check if any set exists for this match
-    $stmt = $conn->prepare("SELECT * FROM sets WHERE match_id = ? ORDER BY set_number DESC LIMIT 1");
-    $stmt->bind_param("i", $matchId);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $lastSet = $result->fetch_assoc();
-    
-    if (!$lastSet) {
-        // No sets exist, create first set
-        // Use INSERT IGNORE to prevent duplicate entry error
-        $stmt = $conn->prepare("INSERT IGNORE INTO sets (match_id, set_number, status) VALUES (?, 1, 'in_progress')");
-        $stmt->bind_param("i", $matchId);
-        $stmt->execute();
-        $currentSet = getCurrentSet($matchId);
-    } else {
-        // Set exists but might be completed, check if we need to create next set
-        if ($lastSet['status'] === 'completed') {
-            // All sets are completed, check if we can create next set
-            $stmt = $conn->prepare("SELECT number_of_sets FROM matches WHERE id = ?");
-            $stmt->bind_param("i", $matchId);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            $matchData = $result->fetch_assoc();
-            $maxSets = $matchData['number_of_sets'] ?? 5;
-            
-            if ($lastSet['set_number'] < $maxSets) {
-                $nextSetNumber = $lastSet['set_number'] + 1;
-                // Use INSERT IGNORE to prevent duplicate entry error
-                $stmt = $conn->prepare("INSERT IGNORE INTO sets (match_id, set_number, status) VALUES (?, ?, 'in_progress')");
-                $stmt->bind_param("ii", $matchId, $nextSetNumber);
-                $stmt->execute();
-                $currentSet = getCurrentSet($matchId);
-            }
-        } else {
-            // Set exists and is in progress, use it
-            $currentSet = $lastSet;
-        }
-    }
-    
-    // Final check - if still no current set, try to get any in_progress set
-    if (!$currentSet) {
-        $currentSet = getCurrentSet($matchId);
-    }
-}
-
-// Ensure we have a current set
-if (!$currentSet) {
-    die('Error: Tidak dapat menemukan atau membuat set untuk pertandingan ini. Silakan refresh halaman atau hubungi admin.');
-}
-
-// Get current game
-$currentGame = getCurrentGame($matchId, $currentSet['id']);
-if (!$currentGame) {
-    // Check if game 1 exists for this set
-    $stmt = $conn->prepare("SELECT * FROM games WHERE match_id = ? AND set_id = ? AND game_number = 1");
-    $stmt->bind_param("ii", $matchId, $currentSet['id']);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $existingGame = $result->fetch_assoc();
-    
-    if (!$existingGame) {
-        // Create first game if not exists
-        // Use INSERT IGNORE to prevent duplicate entry error
-        $stmt = $conn->prepare("INSERT IGNORE INTO games (match_id, set_id, game_number, status) VALUES (?, ?, 1, 'in_progress')");
-        $stmt->bind_param("ii", $matchId, $currentSet['id']);
-        $stmt->execute();
-        $currentGame = getCurrentGame($matchId, $currentSet['id']);
-    } else {
-        // Game exists, use it
-        $currentGame = $existingGame;
-    }
-}
-
-// Final safety check - ensure we have a current game
-if (!$currentGame) {
-    // Try one more time to get any in_progress game
-    $stmt = $conn->prepare("SELECT * FROM games WHERE match_id = ? AND set_id = ? AND status = 'in_progress' ORDER BY game_number DESC LIMIT 1");
-    $stmt->bind_param("ii", $matchId, $currentSet['id']);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $currentGame = $result->fetch_assoc();
-    
-    // If still no game, create one
-    if (!$currentGame) {
-        $stmt = $conn->prepare("INSERT IGNORE INTO games (match_id, set_id, game_number, status) VALUES (?, ?, 1, 'in_progress')");
-        $stmt->bind_param("ii", $matchId, $currentSet['id']);
-        $stmt->execute();
-        $currentGame = getCurrentGame($matchId, $currentSet['id']);
-    }
-}
-
-// If still no game, initialize with default values
-if (!$currentGame) {
-    $currentGame = [
-        'team1_points' => 0,
-        'team2_points' => 0,
-        'id' => null
-    ];
-}
-
-// Get all sets
-$allSets = getAllSets($matchId);
-
-// Check if match is completed
 $isCompleted = ($match['status'] === 'completed');
+$matchPlayers = getMatchPlayers($matchId);
+$allSets = getAllSets($matchId);
+$currentSet = null;
+$currentGame = null;
 $winner = null;
 $finalScore = null;
+$isTieBreak = false;
+
 if ($isCompleted) {
     $winner = getMatchWinner($matchId);
     $finalScore = getFinalScore($matchId);
+} else {
+    // Logic mendapatkan game aktif (seperti kode sebelumnya)
+    $currentSet = getCurrentSet($matchId);
+    if (!$currentSet) {
+        $lastSetNum = 0;
+        if (!empty($allSets)) {
+            $lastSet = end($allSets);
+            $lastSetNum = $lastSet['set_number'];
+        }
+        if ($lastSetNum < $match['number_of_sets']) {
+            $stmt = $conn->prepare("INSERT IGNORE INTO sets (match_id, set_number, status) VALUES (?, ?, 'in_progress')");
+            $nextNum = $lastSetNum + 1;
+            $stmt->bind_param("ii", $matchId, $nextNum);
+            $stmt->execute();
+            $currentSet = getCurrentSet($matchId);
+        }
+    }
+    
+    if ($currentSet) {
+        $currentGame = getCurrentGame($matchId, $currentSet['id']);
+        if (!$currentGame) {
+            $stmt = $conn->prepare("INSERT IGNORE INTO games (match_id, set_id, game_number, status) VALUES (?, ?, 1, 'in_progress')");
+            $stmt->bind_param("ii", $matchId, $currentSet['id']);
+            $stmt->execute();
+            $currentGame = getCurrentGame($matchId, $currentSet['id']);
+        }
+        $isTieBreak = isTieBreak($currentSet['id']);
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -151,307 +72,271 @@ if ($isCompleted) {
     <title>Kontrol Skor - <?= htmlspecialchars($match['match_title']) ?></title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --yamaha-blue: #0D1B4D;
+            --yamaha-red: #E4032E;
+        }
+        body { 
+            font-family: 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
+        }
+        .font-display { font-family: 'Rajdhani', sans-serif; }
+        .font-num { 
+            font-variant-numeric: tabular-nums; 
+            font-family: 'Rajdhani', sans-serif;
+        }
+        
+        .nav-bar {
+            background: linear-gradient(135deg, var(--yamaha-blue) 0%, #1a2b5f 100%);
+            box-shadow: 0 4px 20px rgba(13, 27, 77, 0.3);
+        }
+        
         .score-button {
-            transition: all 0.2s;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }
-        .score-button:hover {
-            transform: scale(1.05);
-        }
-        .score-button:active {
+        
+        .score-button:active { 
             transform: scale(0.95);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .score-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }
+        
+        .control-card {
+            background: white;
+            border: 2px solid #e5e7eb;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }
+        
+        .set-indicator {
+            transition: all 0.3s ease;
+        }
+        
+        .set-indicator.active {
+            background: linear-gradient(135deg, var(--yamaha-red) 0%, #c00228 100%);
+            transform: scale(1.05);
+            box-shadow: 0 4px 15px rgba(228, 3, 46, 0.4);
         }
     </style>
 </head>
-<body class="bg-gray-50">
-    <!-- Navigation -->
-    <nav class="bg-gradient-to-r from-orange-600 to-red-600 text-white shadow-lg">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between items-center h-16">
-                <div class="flex items-center space-x-4">
-                    <a href="index.php" class="hover:text-gray-200"><i class="fas fa-arrow-left mr-2"></i>Kembali</a>
-                    <h1 class="text-xl font-bold"><?= htmlspecialchars($match['match_title']) ?></h1>
-                </div>
-                <div class="flex items-center space-x-4">
-                    <a href="../scoreboard.php?match_id=<?= $matchId ?>" target="_blank" class="bg-purple-500 hover:bg-purple-600 px-4 py-2 rounded-lg transition-colors">
-                        <i class="fas fa-tv mr-2"></i>Scoreboard
-                    </a>
-                    <span class="text-sm"><i class="fas fa-user mr-2"></i><?= htmlspecialchars($_SESSION['full_name']) ?></span>
-                    <a href="../logout.php" class="bg-red-500 hover:bg-red-600 px-4 py-2 rounded-lg transition-colors">
-                        <i class="fas fa-sign-out-alt mr-2"></i>Logout
-                    </a>
-                </div>
+<body>
+    <nav class="nav-bar text-white shadow-lg sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+            <div>
+                <h1 class="text-2xl font-display font-bold tracking-wide mb-1">
+                    <i class="fas fa-gavel mr-2"></i>REFEREE CONTROL
+                </h1>
+                <p class="text-sm text-white/70 font-medium"><?= htmlspecialchars($match['match_title']) ?></p>
+            </div>
+            <div class="flex items-center space-x-3">
+                <a href="../scoreboard.php?match_id=<?= $matchId ?>" target="_blank" 
+                   class="bg-white/20 hover:bg-white/30 backdrop-blur-sm px-4 py-2 rounded-lg transition-all font-medium">
+                    <i class="fas fa-tv mr-2"></i> Scoreboard
+                </a>
+                <a href="index.php" 
+                   class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg transition-all font-bold">
+                    <i class="fas fa-sign-out-alt mr-2"></i> Exit
+                </a>
             </div>
         </div>
     </nav>
 
-    <!-- Main Content -->
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <!-- Match Info -->
-        <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
-                <div>
-                    <p class="text-sm text-gray-600 mb-1">Tim 1</p>
-                    <p class="font-bold text-lg text-blue-600">
-                        <?php foreach ($matchPlayers['team1'] as $p): ?>
-                            <?= htmlspecialchars($p['name']) ?><?= $p !== end($matchPlayers['team1']) ? ' / ' : '' ?>
-                        <?php endforeach; ?>
-                    </p>
-                </div>
-                <div>
-                    <p class="text-sm text-gray-600 mb-1">VS</p>
-                    <p class="font-bold text-lg text-gray-800"><?= getPlayTypeName($match['play_type']) ?></p>
-                </div>
-                <div>
-                    <p class="text-sm text-gray-600 mb-1">Tim 2</p>
-                    <p class="font-bold text-lg text-red-600">
-                        <?php foreach ($matchPlayers['team2'] as $p): ?>
-                            <?= htmlspecialchars($p['name']) ?><?= $p !== end($matchPlayers['team2']) ? ' / ' : '' ?>
-                        <?php endforeach; ?>
-                    </p>
-                </div>
+    <div class="max-w-5xl mx-auto p-6">
+        
+        <!-- Team Names Header -->
+        <div class="control-card rounded-2xl p-6 mb-6 grid grid-cols-3 gap-6 text-center items-center">
+            <div class="text-left">
+                <div class="text-xs font-bold text-blue-500 uppercase tracking-wider mb-2">Team 1</div>
+                <?php foreach ($matchPlayers['team1'] as $p): ?>
+                    <div class="font-display font-bold text-2xl text-blue-600 leading-tight">
+                        <?= htmlspecialchars($p['name']) ?>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+            
+            <div class="flex items-center justify-center">
+                <div class="bg-gradient-to-r from-blue-500 via-gray-400 to-red-500 w-20 h-1 rounded-full"></div>
+            </div>
+            
+            <div class="text-right">
+                <div class="text-xs font-bold text-red-500 uppercase tracking-wider mb-2">Team 2</div>
+                <?php foreach ($matchPlayers['team2'] as $p): ?>
+                    <div class="font-display font-bold text-2xl text-red-600 leading-tight">
+                        <?= htmlspecialchars($p['name']) ?>
+                    </div>
+                <?php endforeach; ?>
             </div>
         </div>
 
-        <!-- Sets Display -->
-        <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
-            <h3 class="text-lg font-bold text-gray-800 mb-4">Set</h3>
-            <div class="grid grid-cols-<?= $match['number_of_sets'] ?> gap-4">
-                <?php for ($i = 1; $i <= $match['number_of_sets']; $i++): 
-                    $set = null;
-                    foreach ($allSets as $s) {
-                        if ($s['set_number'] == $i) {
-                            $set = $s;
-                            break;
+        <?php if (!$isCompleted && $currentGame): ?>
+            
+            <!-- Current Game Control -->
+            <div class="control-card rounded-2xl overflow-hidden mb-6 shadow-2xl">
+                <div class="bg-gradient-to-r from-gray-800 via-gray-700 to-gray-800 text-white text-center py-4">
+                    <div class="text-sm font-bold tracking-widest uppercase">
+                        <?= $isTieBreak ? '<i class="fas fa-bolt mr-2"></i>TIE BREAK' : 'CURRENT GAME' ?>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-2 divide-x divide-gray-200">
+                    <!-- Team 1 Score Control -->
+                    <div class="p-8 text-center bg-gradient-to-br from-blue-50 to-white">
+                        <div class="font-num text-9xl font-black text-blue-600 mb-8 drop-shadow-lg" id="team1_score">
+                            <?= getTennisScore($currentGame['team1_points'], $isTieBreak) ?>
+                        </div>
+                        <button onclick="updateScore(<?= $matchId ?>, 'team1')" 
+                                class="score-button w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white py-5 rounded-xl font-bold text-xl">
+                            <i class="fas fa-plus-circle text-2xl mr-2"></i>
+                            ADD POINT
+                        </button>
+                    </div>
+                    
+                    <!-- Team 2 Score Control -->
+                    <div class="p-8 text-center bg-gradient-to-br from-red-50 to-white">
+                        <div class="font-num text-9xl font-black text-red-600 mb-8 drop-shadow-lg" id="team2_score">
+                            <?= getTennisScore($currentGame['team2_points'], $isTieBreak) ?>
+                        </div>
+                        <button onclick="updateScore(<?= $matchId ?>, 'team2')" 
+                                class="score-button w-full bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white py-5 rounded-xl font-bold text-xl">
+                            <i class="fas fa-plus-circle text-2xl mr-2"></i>
+                            ADD POINT
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Set Scores Display -->
+            <div class="control-card rounded-2xl p-6 mb-6">
+                <h3 class="text-sm font-bold text-gray-500 mb-4 uppercase tracking-wider flex items-center">
+                    <i class="fas fa-list-ol mr-2"></i>Set Scores
+                </h3>
+                <div class="flex justify-center gap-3">
+                    <?php for ($i=1; $i<=$match['number_of_sets']; $i++): 
+                        $s = null; 
+                        foreach($allSets as $set) {
+                            if($set['set_number']==$i) $s=$set;
                         }
-                    }
-                ?>
-                    <div class="text-center p-4 rounded-lg <?= $set && $set['status'] === 'in_progress' ? 'bg-green-50 border-2 border-green-500' : ($set ? 'bg-gray-50' : 'bg-gray-100') ?>">
-                        <p class="text-sm text-gray-600 mb-2">Set <?= $i ?></p>
-                        <?php if ($set): ?>
-                            <div class="flex justify-around">
-                                <span class="text-2xl font-bold text-blue-600"><?= $set['team1_games'] ?></span>
-                                <span class="text-2xl font-bold text-gray-400">-</span>
-                                <span class="text-2xl font-bold text-red-600"><?= $set['team2_games'] ?></span>
+                        $isActive = ($s && $s['status']=='in_progress');
+                    ?>
+                        <div class="set-indicator <?= $isActive ? 'active' : 'bg-gray-100' ?> rounded-xl px-5 py-4 border-2 <?= $isActive ? 'border-red-600' : 'border-gray-200' ?> min-w-[100px]">
+                            <div class="text-xs font-bold <?= $isActive ? 'text-white' : 'text-gray-400' ?> mb-2 uppercase tracking-wider">
+                                Set <?= $i ?>
                             </div>
-                        <?php else: ?>
-                            <div class="flex justify-around">
-                                <span class="text-2xl font-bold text-gray-300">0</span>
-                                <span class="text-2xl font-bold text-gray-300">-</span>
-                                <span class="text-2xl font-bold text-gray-300">0</span>
+                            <div class="font-display font-black text-3xl <?= $isActive ? 'text-white' : 'text-gray-700' ?>">
+                                <span class="<?= $isActive ? '' : 'text-blue-600' ?>"><?= $s ? $s['team1_games'] : 0 ?></span>
+                                <span class="mx-2 <?= $isActive ? 'text-white/50' : 'text-gray-400' ?>">-</span>
+                                <span class="<?= $isActive ? '' : 'text-red-600' ?>"><?= $s ? $s['team2_games'] : 0 ?></span>
                             </div>
-                        <?php endif; ?>
-                    </div>
-                <?php endfor; ?>
-            </div>
-        </div>
-
-        <!-- Current Game Score -->
-        <?php if (!$isCompleted): ?>
-            <div class="bg-gradient-to-r from-green-500 to-blue-500 rounded-xl shadow-lg p-8 mb-6">
-                <h3 class="text-white text-lg font-bold mb-6 text-center">Game Saat Ini</h3>
-                <div class="grid grid-cols-2 gap-8">
-                    <!-- Team 1 -->
-                    <div class="text-center">
-                        <p class="text-white text-sm mb-4">Tim 1</p>
-                        <div class="bg-white rounded-lg p-6 mb-4">
-                            <p class="text-6xl font-bold text-blue-600" id="team1_score">
-                                <?= $currentGame ? getTennisScore($currentGame['team1_points']) : '0' ?>
-                            </p>
                         </div>
-                        <div class="flex gap-2 justify-center">
-                            <button onclick="updateScore(<?= $matchId ?>, 'team1', 'add')" 
-                                    class="score-button bg-white text-green-600 px-6 py-3 rounded-lg font-bold hover:bg-green-50 shadow-lg">
-                                <i class="fas fa-plus"></i> Tambah
-                            </button>
-                            <button onclick="updateScore(<?= $matchId ?>, 'team1', 'remove')" 
-                                    class="score-button bg-white text-red-600 px-6 py-3 rounded-lg font-bold hover:bg-red-50 shadow-lg">
-                                <i class="fas fa-minus"></i> Kurang
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Team 2 -->
-                    <div class="text-center">
-                        <p class="text-white text-sm mb-4">Tim 2</p>
-                        <div class="bg-white rounded-lg p-6 mb-4">
-                            <p class="text-6xl font-bold text-red-600" id="team2_score">
-                                <?= $currentGame ? getTennisScore($currentGame['team2_points']) : '0' ?>
-                            </p>
-                        </div>
-                        <div class="flex gap-2 justify-center">
-                            <button onclick="updateScore(<?= $matchId ?>, 'team2', 'add')" 
-                                    class="score-button bg-white text-green-600 px-6 py-3 rounded-lg font-bold hover:bg-green-50 shadow-lg">
-                                <i class="fas fa-plus"></i> Tambah
-                            </button>
-                            <button onclick="updateScore(<?= $matchId ?>, 'team2', 'remove')" 
-                                    class="score-button bg-white text-red-600 px-6 py-3 rounded-lg font-bold hover:bg-red-50 shadow-lg">
-                                <i class="fas fa-minus"></i> Kurang
-                            </button>
-                        </div>
-                    </div>
+                    <?php endfor; ?>
                 </div>
             </div>
+
+            <!-- Action Buttons -->
+            <div class="grid grid-cols-2 gap-4">
+                <button onclick="undoScore(<?= $matchId ?>)" 
+                        class="control-card rounded-xl py-4 font-bold text-yellow-700 border-2 border-yellow-400 bg-gradient-to-r from-yellow-50 to-yellow-100 hover:from-yellow-100 hover:to-yellow-200 transition-all hover:scale-105">
+                    <i class="fas fa-undo-alt mr-2 text-lg"></i> UNDO LAST POINT
+                </button>
+                <button onclick="finishMatch(<?= $matchId ?>)" 
+                        class="control-card rounded-xl py-4 font-bold text-gray-700 border-2 border-gray-400 bg-gradient-to-r from-gray-100 to-gray-200 hover:from-gray-200 hover:to-gray-300 transition-all hover:scale-105">
+                    <i class="fas fa-flag-checkered mr-2 text-lg"></i> FORCE FINISH
+                </button>
+            </div>
+
         <?php else: ?>
-            <!-- Final Score Display -->
-            <div class="bg-gradient-to-r from-green-500 to-blue-500 rounded-xl shadow-lg p-8 mb-6">
-                <h3 class="text-white text-2xl font-bold mb-6 text-center">Skor Final</h3>
-                <div class="grid grid-cols-2 gap-8">
-                    <div class="text-center">
-                        <p class="text-white text-lg mb-4">Tim 1</p>
-                        <div class="bg-white rounded-lg p-6">
-                            <p class="text-6xl font-bold text-blue-600">
-                                <?= $finalScore['team1_sets'] ?>
-                            </p>
-                            <p class="text-xl text-gray-600 mt-2">Set</p>
-                        </div>
-                    </div>
-                    <div class="text-center">
-                        <p class="text-white text-lg mb-4">Tim 2</p>
-                        <div class="bg-white rounded-lg p-6">
-                            <p class="text-6xl font-bold text-red-600">
-                                <?= $finalScore['team2_sets'] ?>
-                            </p>
-                            <p class="text-xl text-gray-600 mt-2">Set</p>
-                        </div>
+            
+            <!-- Match Completed State -->
+            <div class="control-card rounded-2xl p-12 text-center">
+                <div class="w-24 h-24 bg-gradient-to-br from-green-400 to-green-600 text-white rounded-full flex items-center justify-center mx-auto mb-6 shadow-2xl">
+                    <i class="fas fa-trophy text-5xl"></i>
+                </div>
+                <h2 class="text-3xl font-display font-black text-gray-800 mb-2">MATCH COMPLETED</h2>
+                <p class="text-gray-500 mb-8 font-medium">Final score has been recorded</p>
+                
+                <div class="bg-gradient-to-r from-gray-100 to-gray-200 rounded-2xl py-8 mb-8 border-2 border-gray-300">
+                    <div class="text-sm text-gray-500 font-bold uppercase tracking-wider mb-2">Final Score</div>
+                    <div class="font-display text-6xl font-black text-gray-800">
+                        <span class="text-blue-600"><?= $finalScore['team1_sets'] ?></span>
+                        <span class="mx-4 text-gray-400">-</span>
+                        <span class="text-red-600"><?= $finalScore['team2_sets'] ?></span>
                     </div>
                 </div>
-            </div>
-        <?php endif; ?>
 
-        <!-- Action Buttons -->
-        <div class="bg-white rounded-xl shadow-lg p-6">
-            <?php if ($isCompleted): ?>
-                <div class="text-center">
-                    <h3 class="text-lg font-bold text-gray-800 mb-4">Pertandingan Telah Selesai</h3>
-                    <a href="index.php" class="inline-block bg-blue-500 hover:bg-blue-600 text-white px-8 py-3 rounded-lg font-semibold transition-colors">
-                        <i class="fas fa-arrow-left mr-2"></i>Kembali ke Daftar Pertandingan
-                    </a>
-                </div>
-            <?php else: ?>
-                <h3 class="text-lg font-bold text-gray-800 mb-4">Aksi</h3>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <button onclick="nextGame(<?= $matchId ?>)" 
-                            class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-                        <i class="fas fa-forward mr-2"></i>Game Berikutnya
-                    </button>
-                    <button onclick="nextSet(<?= $matchId ?>)" 
-                            class="bg-purple-500 hover:bg-purple-600 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-                        <i class="fas fa-step-forward mr-2"></i>Set Berikutnya
-                    </button>
-                    <button onclick="finishMatch(<?= $matchId ?>)" 
-                            class="bg-red-500 hover:bg-red-600 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-                        <i class="fas fa-flag-checkered mr-2"></i>Selesai Pertandingan
-                    </button>
-                </div>
-            <?php endif; ?>
-        </div>
+                <a href="index.php" 
+                   class="inline-flex items-center bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-8 py-4 rounded-xl font-bold shadow-xl transition-all transform hover:scale-105">
+                    <i class="fas fa-home mr-3 text-xl"></i> BACK TO DASHBOARD
+                </a>
+            </div>
+            
+        <?php endif; ?>
+        
     </div>
 
     <script>
-        function updateScore(matchId, team, action) {
+        function updateScore(matchId, team) {
             fetch('../api/update-score.php', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    match_id: matchId,
-                    team: team,
-                    action: action
-                })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ match_id: matchId, team: team })
             })
-            .then(response => {
-                // Check if response is ok
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    throw new Error('Response is not JSON');
-                }
-                return response.json();
-            })
+            .then(r => r.json())
             .then(data => {
-                if (data.success) {
-                    document.getElementById('team1_score').textContent = data.team1_score;
-                    document.getElementById('team2_score').textContent = data.team2_score;
-                    // Reload page to update sets
-                    setTimeout(() => location.reload(), 500);
+                if(data.success) {
+                    location.reload();
                 } else {
-                    alert('Error: ' + (data.message || 'Unknown error'));
+                    alert(data.message || 'Error updating score');
                 }
             })
-            .catch(error => {
-                console.error('Error:', error);
-                // Don't show alert if it's just a JSON parse error - reload instead
-                // The score was likely updated successfully
-                setTimeout(() => location.reload(), 500);
+            .catch(err => {
+                console.error('Error:', err);
+                alert('Network error. Please try again.');
             });
         }
-
-        function nextGame(matchId) {
-            if (confirm('Lanjut ke game berikutnya?')) {
-                fetch('../api/next-game.php', {
+        
+        function undoScore(matchId) {
+            if(confirm('Undo the last point?')) {
+                fetch('../api/undo-score.php', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ match_id: matchId })
                 })
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
-                    if (data.success) {
-                        location.reload();
-                    } else {
-                        alert('Error: ' + data.message);
-                    }
+                    if(data.success) location.reload();
+                    else alert(data.message || 'Error undoing score');
+                })
+                .catch(err => {
+                    console.error('Error:', err);
+                    alert('Network error. Please try again.');
                 });
             }
         }
-
-        function nextSet(matchId) {
-            if (confirm('Lanjut ke set berikutnya?')) {
-                fetch('../api/next-set.php', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ match_id: matchId })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        location.reload();
-                    } else {
-                        alert('Error: ' + data.message);
-                    }
-                });
-            }
-        }
-
+        
         function finishMatch(matchId) {
-            if (confirm('Selesaikan pertandingan ini?')) {
+            if(confirm('Force finish this match? This action cannot be undone.')) {
                 fetch('../api/finish-match.php', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ match_id: matchId })
                 })
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
-                    if (data.success) {
-                        alert('Pertandingan selesai!');
-                        window.location.href = 'index.php';
-                    } else {
-                        alert('Error: ' + data.message);
-                    }
+                    if(data.success) location.reload();
+                    else alert(data.message || 'Error finishing match');
+                })
+                .catch(err => {
+                    console.error('Error:', err);
+                    alert('Network error. Please try again.');
                 });
             }
         }
     </script>
 </body>
 </html>
-
